@@ -134,18 +134,31 @@ func run(ctx context.Context, cfg config.Config) error {
 		sources.Add(1)
 		go func() {
 			defer sources.Done()
+			// Back off after repeated failures (a permanently broken stream,
+			// e.g. a missing ROS user, used to respawn a process every
+			// second forever). A stream that stays up for a minute resets
+			// the delay, so transient outages still recover quickly.
+			delay := time.Second
+			const maxDelay = 30 * time.Second
 			for sourceCtx.Err() == nil {
+				started := time.Now()
 				err := collector.StreamRawTopic(sourceCtx, setup, environment, user, topic, messageType, readTimeout, records)
 				if sourceCtx.Err() != nil {
 					return
 				}
-				slog.Warn("ROS2 raw topic stream stopped", "topic", topic, "error", err)
-				timer := time.NewTimer(time.Second)
+				if time.Since(started) >= time.Minute {
+					delay = time.Second
+				}
+				slog.Warn("ROS2 raw topic stream stopped", "topic", topic, "error", err, "retry_in", delay)
+				timer := time.NewTimer(delay)
 				select {
 				case <-sourceCtx.Done():
 					timer.Stop()
 					return
 				case <-timer.C:
+				}
+				if delay < maxDelay {
+					delay *= 2
 				}
 			}
 		}()
