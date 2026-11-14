@@ -26,12 +26,13 @@ const updateRepository = "chaeoi/baize"
 const defaultMirror = "https://gitwarp.canghai.org"
 
 type githubClient struct {
-	http       *http.Client
-	mu         sync.Mutex
-	mirrorETag string
-	cachedURL  string
-	cachedHash string
-	cachedData []byte
+	http        *http.Client
+	mu          sync.Mutex
+	mirrorETag  string
+	cachedURL   string
+	cachedHash  string
+	cachedData  []byte
+	currentHash string
 }
 
 func NewGitHubClient(httpClient *http.Client) *githubClient {
@@ -79,7 +80,7 @@ func (c *githubClient) checkGitHub(ctx context.Context, current, goos, arch stri
 		return nil, fmt.Errorf("GitHub returned an invalid latest release path")
 	}
 	version := parts[4]
-	if !isNewerVersion(version, current) {
+	if versionNumber(version) < versionNumber(current) {
 		return nil, nil
 	}
 	checksumURL := "https://github.com/" + updateRepository + "/releases/download/" + version + "/SHA256SUMS"
@@ -110,6 +111,9 @@ func (c *githubClient) checkGitHub(ctx context.Context, current, goos, arch stri
 	}
 	if len(digest) != 64 {
 		return nil, fmt.Errorf("GitHub release %s has no SHA-256 checksum for %s", version, assetName)
+	}
+	if !c.isUpdateCandidate(version, digest, current) {
+		return nil, nil
 	}
 	return &model.UpdateInfo{Version: version, OS: goos, Arch: arch, SHA256: digest, URL: "https://github.com/" + updateRepository + "/releases/download/" + version + "/" + assetName}, nil
 }
@@ -163,13 +167,14 @@ func (c *githubClient) checkMirror(ctx context.Context, current, goos, arch stri
 	if err != nil {
 		return nil, err
 	}
+	update := c.isUpdateCandidate(version, digest, current)
 	c.mu.Lock()
 	c.mirrorETag = etag
-	if version != "" && isNewerVersion(version, current) {
+	if update {
 		c.cachedURL, c.cachedHash, c.cachedData = assetURL, digest, data
 	}
 	c.mu.Unlock()
-	if !isNewerVersion(version, current) {
+	if !update {
 		return nil, nil
 	}
 	return &model.UpdateInfo{Version: version, OS: goos, Arch: arch, SHA256: digest, Size: int64(len(data)), URL: assetURL}, nil
@@ -312,6 +317,57 @@ func (c *githubClient) Download(ctx context.Context, update model.UpdateInfo, wr
 
 func isNewerVersion(candidate, current string) bool {
 	return versionNumber(candidate) > versionNumber(current)
+}
+
+// isUpdateCandidate reports whether a candidate release should replace the
+// running binary. A strictly newer version always qualifies. A candidate
+// with the same version number also qualifies when its bytes differ from
+// the running binary: release versions are date-based (YYYYMMDD), and the
+// release workflow deletes and recreates the same tag when a day's build
+// is re-run, so a same-day rebuild would otherwise never reach the robot.
+// The latest release is authoritative by content here; a version that
+// parses to the same number (for example a future dotted version, which
+// versionNumber reads as 0) is decided the same way, by its hash.
+func (c *githubClient) isUpdateCandidate(version, digest, current string) bool {
+	if isNewerVersion(version, current) {
+		return true
+	}
+	if versionNumber(version) != versionNumber(current) {
+		return false
+	}
+	if digest == "" {
+		return false
+	}
+	currentHash, err := c.currentBinaryHash()
+	if err != nil {
+		return false
+	}
+	return digest != currentHash
+}
+
+// currentBinaryHash returns the SHA-256 of the running Agent binary,
+// computed once and cached for the lifetime of the client.
+func (c *githubClient) currentBinaryHash() (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.currentHash != "" {
+		return c.currentHash, nil
+	}
+	path, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	c.currentHash = hex.EncodeToString(hash.Sum(nil))
+	return c.currentHash, nil
 }
 
 func versionNumber(value string) int64 {
