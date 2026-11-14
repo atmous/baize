@@ -3,6 +3,7 @@ package collector
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"regexp"
 	"sort"
 	"strings"
@@ -12,9 +13,29 @@ import (
 var rosEnvironmentNamePattern = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
 var rosUserNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
+// requireROSUser fails fast when the agent runs as root and the profile's
+// ROS user does not exist on this host. Without this, wrapROSCommand still
+// emits a setpriv command and the subscriber dies on every start with the
+// cryptic "setpriv: failed to parse reuid", retried once a second forever.
+func requireROSUser(userName string, euid int) error {
+	if userName == "" || euid != 0 {
+		return nil
+	}
+	if !rosUserNamePattern.MatchString(userName) {
+		return fmt.Errorf("invalid ROS user %q", userName)
+	}
+	if _, err := user.Lookup(userName); err != nil {
+		return fmt.Errorf("ROS user %q does not exist on this host", userName)
+	}
+	return nil
+}
+
 func rosSubscriberCommand(setup []string, environment map[string]string, user, topic, messageType string, readTimeout time.Duration) (string, error) {
 	if topic == "" || messageType == "" {
 		return "", fmt.Errorf("ROS2 subscriber topic and message type are required")
+	}
+	if err := requireROSUser(user, os.Geteuid()); err != nil {
+		return "", err
 	}
 	binary := os.Getenv("BAIZE_ROS2_SUBSCRIBER")
 	if binary == "" {
