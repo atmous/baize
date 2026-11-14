@@ -24,3 +24,21 @@ func TestROSCommandDropsRootToProfileUser(t *testing.T) {
 		t.Fatalf("ROS user transition was not configured: %s", command)
 	}
 }
+
+func TestRequireROSUser(t *testing.T) {
+	if err := requireROSUser("definitely-not-a-real-user-xyz", 0); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing ROS user must be rejected, got: %v", err)
+	}
+	if err := requireROSUser("root", 0); err != nil {
+		t.Fatalf("existing ROS user must be accepted, got: %v", err)
+	}
+	if err := requireROSUser("definitely-not-a-real-user-xyz", 1000); err != nil {
+		t.Fatalf("ROS user is irrelevant when not running as root, got: %v", err)
+	}
+	if err := requireROSUser("", 0); err != nil {
+		t.Fatalf("empty ROS user must be accepted, got: %v", err)
+	}
+	if err := requireROSUser("Bad User!", 0); err == nil || !strings.Contains(err.Error(), "invalid ROS user") {
+		t.Fatalf("malformed ROS user must be rejected, got: %v", err)
+	}
+}
